@@ -10,8 +10,11 @@ using System.Text;
 using Newtonsoft.Json;
 using abkrServer.Parser.Listener;
 using System.Collections.ObjectModel;
+
 using static Server;
 using System.Net.Sockets;
+using Amazon.Auth.AccessControlPolicy;
+using System;
 
 namespace abkr.CatalogManager
 {
@@ -57,8 +60,6 @@ namespace abkr.CatalogManager
 
         public static Task ExecuteStatementAsync(string sql)
         {
-            logger.LogMessage("ExecuteStatementAsync called");
-
             // Create a new instance of the ANTLR input stream with the SQL statement
             var inputStream = new AntlrInputStream(sql);
 
@@ -74,7 +75,7 @@ namespace abkr.CatalogManager
             // Invoke the parser's entry rule (statement) and get the parse tree
             var parseTree = parser.statement();
 
-            var listener = new MyAbkrGrammarListener("C:/Users/Simon Zoltán/Desktop/ab2-project-tbd/abkrServer/Parser/example.xml",_catalogManager, logger);
+            var listener = new MyAbkrGrammarListener("C:/Users/bfcsa/github-classroom/2023-AB2-projects/ab2-project-tbd/abkrServer/Parser/example.xml", _catalogManager, logger);
             ParseTreeWalker.Default.Walk(listener, parseTree);
 
             // Perform actions based on the parsed statement
@@ -135,35 +136,20 @@ namespace abkr.CatalogManager
             else if (listener.StatementType == StatementType.Insert)
             {
                 Dictionary<string, object> rowData = new Dictionary<string, object>();
-                //string? primaryKeyColumn = null;
-
-                //logger.LogMessage("Before calling Insert method...");
-                //logger.LogMessage("Columns: " + string.Join(", ", listener.Columns.Keys));
-                //logger.LogMessage("Values: " + string.Join(", ", listener.Columns.Values));
-
-                //primaryKeyColumn = _catalogManager?.GetPrimaryKeyColumn(listener.DatabaseName, listener.TableName)
-                //        ?? throw new Exception("ERROR: Primary key not found!");
-
-                // Iterate through the listener.Columns dictionary
+                
                 foreach (var column in listener.Columns)
                 {
                     rowData[column.Key] = column.Value;
                 }
 
-                //logger.LogMessage("Row data: " + string.Join(", ", rowData.Select(kv => $"{kv.Key}={kv.Value}")));
 
                 RecordManager.Insert(listener.DatabaseName, listener.TableName, rowData, _client, _catalogManager);
-
-                //logger.LogMessage("After calling Insert method...");
-
-                //Query(listener.DatabaseName, listener.TableName);
             }
             else if (listener.StatementType == StatementType.Delete)
             {
                 //PrintAllDocuments(listener.DatabaseName, listener.TableName);
                 var conditions = listener.Conditions;
                 RecordManager.Delete(listener.DatabaseName, listener.TableName,conditions, _client, _catalogManager);
-                //PrintAllDocuments(listener.DatabaseName, listener.TableName);
             }
             else if (listener.StatementType == StatementType.Select)
             {
@@ -208,33 +194,6 @@ namespace abkr.CatalogManager
             }
         }
 
-        public static void Query(string databaseName, string tableName)
-        {
-            logger.LogMessage($"Querying {databaseName}.{tableName}");
-            var collection = _client?.GetDatabase(databaseName).GetCollection<BsonDocument>(tableName)
-                ?? throw new Exception("ERROR: Table not found! Null ref");
-
-            var filter = Builders<BsonDocument>.Filter.Empty;
-            var documents = collection.Find(filter).ToList();
-
-            logger.LogMessage("Results:");
-            foreach (var document in documents)
-            {
-                logger.LogMessage(document.ToString());
-            }
-        }
-
-        public static void PrintAllDocuments(string databaseName, string tableName)
-        {
-            var collection = _client?.GetDatabase(databaseName).GetCollection<BsonDocument>(tableName);
-            var documents = collection.Find(Builders<BsonDocument>.Filter.Empty).ToList();
-
-            logger.LogMessage($"Documents in {databaseName}.{tableName}:");
-            foreach (var document in documents)
-            {
-                logger.LogMessage(document.ToString());
-            }
-        }
 
         public List<DatabaseData> GetDatabasesAndTables()
         {
@@ -264,66 +223,78 @@ namespace abkr.CatalogManager
 
         private static void HandleSelectStatementWithJoin(string databaseName, List<string> tableNames, List<JoinCondition> joinConditions, List<FilterCondition> conditions, string[] selectedColumns)
         {
-            //if (tableNames.Count < 2 || joinConditions.Count != tableNames.Count - 1)
-            //    throw new Exception("Incorrect number of tables or join conditions provided");
+            if (tableNames.Count < 2 || joinConditions.Count != tableNames.Count - 1)
+                throw new Exception("Incorrect number of tables or join conditions provided");
 
-            //ValidateDatabaseAndTable(databaseName, tableNames);
+            ValidateDatabaseAndTable(databaseName, tableNames);
 
-            //// Assume the first table is the outer table
-            //var rows = GetRows(databaseName, tableNames[0], conditions);
+            var rows = GetRows(databaseName, tableNames[0], conditions);
 
-            //for (int i = 1; i < tableNames.Count; i++)
-            //{
-            //    var joinRows = GetIndexedRows(databaseName, tableNames[i], joinConditions[i - 1].Column2);
+            for (int i = 1; i < tableNames.Count; i++)
+            {
+                var joinRows = GetIndexedRows(databaseName, tableNames[i], joinConditions[i - 1].Column2, conditions);
+                rows = IndexedNestedLoopJoin(rows, joinRows, joinConditions[i - 1].Column1, joinConditions[i - 1].Column2, tableNames[i]);
+            }
 
-            //    rows = IndexedNestedLoopJoin(rows, joinRows, joinConditions[i - 1].Column1, joinConditions[i - 1].Column2, tableNames[i]);
-            //}
-
-            //var formattedResult = FormatOutput(rows, selectedColumns, databaseName, tableNames[0]);
-            //LastQueryResult = formattedResult;
+            var formattedResult = FormatOutput(rows, selectedColumns, databaseName, tableNames[0]);
+            LastQueryResult = formattedResult;
         }
 
-        //private static Dictionary<object,Dictionary<string, object>> GetIndexedRows()
-        //{
+        private static Dictionary<object, List<Dictionary<string, object>>> GetIndexedRows(string databaseName, string tableName, string column, List<FilterCondition> filterConditions)
+        {
+            var rows = GetRows(databaseName, tableName, filterConditions);
 
-        //}
+            return rows.GroupBy(row => row[column])
+                        .ToDictionary(group => group.Key, group => group.ToList());
+        }
 
 
-            private static List<Dictionary<string, object>> IndexedNestedLoopJoin(
-        List<Dictionary<string, object>> outerRows,
-        Dictionary<object, Dictionary<string, object>> indexedInnerRows,
-        string outerColumn,
-        string innerColumn,
-        string innerTableName)
+        private static List<Dictionary<string, object>> IndexedNestedLoopJoin(
+            List<Dictionary<string, object>> outerRows,
+            Dictionary<object, List<Dictionary<string, object>>> indexedInnerRows,
+            string outerColumn,
+            string innerColumn,
+            string innerTableName)
         {
             var mergedRows = new List<Dictionary<string, object>>();
+
             foreach (var outerRow in outerRows)
             {
-                if (indexedInnerRows.ContainsKey(outerRow[outerColumn]))
+                var outerColumnValue = outerRow[outerColumn];
+                if (indexedInnerRows.ContainsKey(outerColumnValue))
                 {
-                    var innerRow = indexedInnerRows[outerRow[outerColumn]];
-                    var mergedRow = new Dictionary<string, object>(outerRow);
-
-                    foreach (var column in innerRow)
+                    var innerRows = indexedInnerRows[outerColumnValue];
+                    foreach (var innerRow in innerRows)
                     {
-                        mergedRow[$"{innerTableName}.{column.Key}"] = column.Value;
+                        var mergedRow = new Dictionary<string, object>(outerRow);
+                        foreach (var column in innerRow)
+                        {
+                            mergedRow[$"{innerTableName}.{column.Key}"] = column.Value;
+                        }
+                        mergedRows.Add(mergedRow);
                     }
-
-                    mergedRows.Add(mergedRow);
-
                 }
+                else
+                {
+                    // Log the message and continue with an empty row for this key
+                    //logger.LogMessage($"The key '{outerColumnValue}' was not present in the indexedInnerRows dictionary for the table {innerTableName}. Outer row: {JsonConvert.SerializeObject(outerRow)}");
+                    var mergedRow = new Dictionary<string, object>(outerRow);
+                    mergedRows.Add(mergedRow);
+                }
+
             }
+
             return mergedRows;
         }
 
-
         private static void ValidateDatabaseAndTable(string databasename, List<string> tableNames)
         {
-            if (tableNames.Any(string.IsNullOrEmpty) || databasename == null)
+            if (string.IsNullOrEmpty(databasename) || tableNames.Any(string.IsNullOrEmpty))
             {
                 throw new Exception("Database or table name missing in statement");
             }
         }
+
 
         private static List<Dictionary<string, object>> MergeRows(List<Dictionary<string, object>> rows, List<Dictionary<string, object>> joinRows, string conditionColumnName, string joinedTableName)
         {
@@ -409,7 +380,5 @@ namespace abkr.CatalogManager
             resultStringBuilder.AppendLine("+" + new string('-', resultStringBuilder.ToString().Split('\n')[0].Length - 2) + "+");
             return resultStringBuilder.ToString();
         }
-
-
     }
 }

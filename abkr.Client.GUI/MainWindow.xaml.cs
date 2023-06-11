@@ -10,9 +10,12 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using abkr.ClientLogger;
 using Microsoft.Win32;
 using Newtonsoft.Json;
+using System.Xml;
+using System.Reflection;
 
 namespace abkr.Client.GUI
 {
@@ -42,6 +45,7 @@ namespace abkr.Client.GUI
             _writerSemaphore = new SemaphoreSlim(1, 1); // Initialize semaphore
 
             ConnectToServerAsync().ConfigureAwait(false);
+        
         }
 
         private async Task ConnectToServerAsync()
@@ -171,7 +175,7 @@ namespace abkr.Client.GUI
                 string response = responseBuilder.ToString();
 
                 // Log the response
-                UpdateConsole(response);
+                
 
                 // If the statement was a SELECT statement, display the result in a new window
                 if (sqlStatement.Trim().ToLower().StartsWith("select"))
@@ -181,18 +185,65 @@ namespace abkr.Client.GUI
                     var selectWindow = new SelectWindow();
                     selectWindow.SetData(rawData);
                     selectWindow.Show();
+                    response = sqlStatement + "succeeded";
                 }
+                
+                UpdateConsole(response);
             }
 
             await ObjectExplorerAsync();
 
         }
 
-        private void OpenEditWindow(List<Dictionary<string, object>> data)
+        private async void SelectTopRows(object sender, MouseButtonEventArgs e)
         {
-            var editWindow = new EditWindow();
-            editWindow.SetData(data);
-            editWindow.Show();
+            if (sender is ListBoxItem listBoxItem)
+            {
+                string tableName = listBoxItem.Content.ToString();
+                var listBox = ItemsControl.ItemsControlFromItemContainer(listBoxItem) as ListBox;
+                if (listBox != null && listBox.Parent is Expander expander)
+                {
+                    string databaseName = expander.Header.ToString();
+
+                    // Build the SELECT statement
+                    string sqlStatement = $"SELECT * FROM {databaseName}.{tableName}";
+
+                    // Send SQL statement to the server
+                    await _writer.WriteLineAsync(sqlStatement);
+
+                    // Receive response from server
+                    StringBuilder responseBuilder = new StringBuilder();
+                    string line;
+                    while ((line = await _reader.ReadLineAsync()) != null)
+                    {
+                        if (line == "end")  // Stop when an empty line is encountered
+                        {
+                            break;
+                        }
+                        responseBuilder.AppendLine(line);
+                    }
+
+                    string response = responseBuilder.ToString();
+
+                    // Log the response
+                    UpdateConsole(response);
+
+                    // Display the result in the EditWindow
+                    var rawData = JsonConvert.DeserializeObject<List<Dictionary<string, object>>>(response);
+                    var editWindow = new EditWindow(this, databaseName, tableName);
+                    editWindow.SetData(rawData);
+                    editWindow.Show();
+                }
+            }
+        }
+
+
+        public async Task SendDataToServerAsync(string data)
+        {
+            if (_writer != null)
+            {
+                await _writer.WriteLineAsync(data);
+            }
         }
 
         private void UpdateConsole(string message)
